@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .access import UnknownUser, User, load_users
+from .access import UnknownUser, User, can_read, load_users
 from .guardrails import check_input, check_output, mask_pii
 from .index import SecureIndex, load_chunks
 from .llm import NO_ANSWER, generate, is_no_answer
@@ -56,7 +56,7 @@ class SecureRAG:
             raise UnknownUser(name)
         return self.users[name]
 
-    def ask(self, user_name: str, question: str) -> Answer:
+    def ask(self, user_name: str, question: str, channel: str = "direct") -> Answer:
         started = time.perf_counter()
         user = self.user(user_name)
         result = self._ask(user, question)
@@ -65,6 +65,7 @@ class SecureRAG:
             "event": "query",
             "user": user.name,
             "role": user.role,
+            "channel": channel,
             "question_masked": masked_q,
             "question_sha256": hashlib.sha256(question.encode()).hexdigest()[:16],
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -95,6 +96,15 @@ class SecureRAG:
         text, pii = mask_pii(text)
         reasons = [f"pii_masked:{k}" for k in pii]
         return Answer("answered", text, sources=sources, reasons=reasons, backend=backend, context=context)
+
+    def readable_documents(self, user_name: str) -> list[dict]:
+        """Документы, доступные пользователю: только идентификатор и название, без содержимого."""
+        user = self.user(user_name)
+        docs = {}
+        for c in self.index.chunks:
+            if can_read(user, c.classification, list(c.departments)):
+                docs[c.doc_id] = c.title
+        return [{"id": k, "title": v} for k, v in sorted(docs.items())]
 
     def chunk_text(self, chunk_ids: list[str]) -> str:
         by_id = {c.chunk_id: c.text for c in self.index.chunks}
