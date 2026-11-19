@@ -21,7 +21,7 @@ from pathlib import Path
 from .access import UnknownUser, User, load_users
 from .guardrails import check_input, check_output, mask_pii
 from .index import SecureIndex, load_chunks
-from .llm import NO_ANSWER, generate
+from .llm import NO_ANSWER, generate, is_no_answer
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,6 +36,7 @@ class Answer:
     sources: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     backend: str = ""
+    context: list[str] = field(default_factory=list)  # идентификаторы фрагментов, выданных модели
 
 
 class SecureRAG:
@@ -81,18 +82,23 @@ class SecureRAG:
             return Answer("no_context", NO_ANSWER)
 
         chunks = [c for c, _ in hits]
+        context = [c.chunk_id for c in chunks]
         text, backend = generate(question, chunks, self.backend)
-        if text.startswith(NO_ANSWER[:30]):
-            return Answer("no_context", NO_ANSWER, backend=backend)
+        if is_no_answer(text):
+            return Answer("no_context", NO_ANSWER, backend=backend, context=context)
 
         sources = sorted({c.doc_id for c in chunks})
         out = check_output(text, set(sources))
         if not out.allowed:
-            return Answer("blocked_output", BLOCKED_OUTPUT, reasons=out.reasons, backend=backend)
+            return Answer("blocked_output", BLOCKED_OUTPUT, reasons=out.reasons, backend=backend, context=context)
 
         text, pii = mask_pii(text)
         reasons = [f"pii_masked:{k}" for k in pii]
-        return Answer("answered", text, sources=sources, reasons=reasons, backend=backend)
+        return Answer("answered", text, sources=sources, reasons=reasons, backend=backend, context=context)
+
+    def chunk_text(self, chunk_ids: list[str]) -> str:
+        by_id = {c.chunk_id: c.text for c in self.index.chunks}
+        return "\n".join(by_id[i] for i in chunk_ids if i in by_id)
 
     def _audit(self, record: dict) -> None:
         record = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **record}

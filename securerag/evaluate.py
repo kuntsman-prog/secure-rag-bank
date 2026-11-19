@@ -1,6 +1,8 @@
-"""Автоматическая оценка: качество поиска и метрики безопасности.
+"""Автоматическая оценка: качество поиска, метрики безопасности и достоверность ответов.
 
 Главная метрика безопасности: число утечек закрытых документов должно быть 0.
+Достоверность ответов (раздел answer_quality) информативна и не влияет на код возврата:
+её смысл в сравнении режимов и моделей.
 """
 from __future__ import annotations
 
@@ -8,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from .faithfulness import check_answer
 from .pipeline import ROOT, SecureRAG
 
 
@@ -49,6 +52,59 @@ def run(rag: SecureRAG, cases_file: Path | None = None) -> dict:
         "pii_masking_pass_rate": _rate(stats["pii"]),
         "benign_false_positives": false_positives,
         "failures": failures,
+        "answer_quality": answer_quality(rag, spec),
+    }
+
+
+def answer_quality(rag: SecureRAG, spec: dict) -> dict:
+    claims = [0, 0]
+    numbers_ok = [0, 0]
+    citations_ok = [0, 0]
+    facts = [0, 0]
+    refusals = [0, 0]
+    issues = []
+
+    for case in spec.get("quality", []):
+        ans = rag.ask(case["user"], case["q"])
+        expect = case.get("expect_facts", [])
+        facts[1] += len(expect)
+        numbers_ok[1] += 1
+        citations_ok[1] += 1
+        if ans.decision != "answered":
+            issues.append({"q": case["q"], "problem": "нет ответа", "decision": ans.decision})
+            continue
+        chk = check_answer(ans.text, rag.chunk_text(ans.context), set(ans.sources), expect)
+        claims[0] += chk.claims_supported
+        claims[1] += chk.claims_total
+        numbers_ok[0] += int(not chk.unsupported_numbers)
+        citations_ok[0] += int(chk.citations_ok)
+        facts[0] += len(expect) - len(chk.missing_facts)
+        problems = {
+            "утверждения без опоры на контекст": chk.unsupported_claims,
+            "числа, которых нет в контексте": chk.unsupported_numbers,
+            "не найдены ожидаемые факты": chk.missing_facts,
+        }
+        if not chk.citations_ok:
+            problems["нет корректных ссылок"] = ["ответ без ссылки или со ссылкой на невыданный документ"]
+        for name, detail in problems.items():
+            if detail:
+                issues.append({"q": case["q"], "problem": name, "detail": detail})
+
+    for case in spec.get("unanswerable", []):
+        ans = rag.ask(case["user"], case["q"])
+        refusals[1] += 1
+        if ans.decision == "no_context":
+            refusals[0] += 1
+        else:
+            issues.append({"q": case["q"], "problem": "ответ вместо отказа", "answer": ans.text[:200]})
+
+    return {
+        "grounded_claims": _rate(claims),
+        "answers_with_supported_numbers": _rate(numbers_ok),
+        "answers_with_valid_citations": _rate(citations_ok),
+        "expected_facts_found": _rate(facts),
+        "correct_refusals": _rate(refusals),
+        "issues": issues,
     }
 
 

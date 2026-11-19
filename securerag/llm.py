@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 import urllib.request
 
@@ -22,6 +23,14 @@ SYSTEM_PROMPT = (
 )
 
 NO_ANSWER = "В доступных вам документах ответа нет."
+
+_NO_ANSWER_MARKERS = ("ответа нет", "нет ответа", "нет информации", "не содержит", "не содержится", "не указан")
+
+
+def is_no_answer(text: str) -> bool:
+    """Модель может сформулировать отказ по-своему: короткий ответ с маркером отказа считаем отказом."""
+    t = text.lower().replace("ё", "е").strip(" «»\"'\n")
+    return t.startswith(NO_ANSWER[:30].lower()) or (len(t) < 200 and any(m in t for m in _NO_ANSWER_MARKERS))
 
 
 def build_context(chunks: list[Chunk]) -> str:
@@ -55,7 +64,8 @@ def ollama_answer(question: str, chunks: list[Chunk]) -> str:
         ],
     }
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    timeout = float(os.environ.get("OLLAMA_TIMEOUT", "300"))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())["message"]["content"].strip()
 
 
@@ -64,7 +74,9 @@ def generate(question: str, chunks: list[Chunk], backend: str) -> tuple[str, str
     if backend == "ollama":
         try:
             return ollama_answer(question, chunks), "ollama"
-        except Exception:
-            # Модель недоступна: безопасный откат на режим без LLM
+        except Exception as exc:
+            # Модель недоступна: безопасный откат на режим без LLM, причина выводится в stderr
+            detail = exc.read().decode(errors="replace") if hasattr(exc, "read") else ""
+            print(f"[warn] Ollama недоступна, откат на режим без LLM: {exc} {detail}".strip(), file=sys.stderr)
             return extractive_answer(question, chunks), "extractive_fallback"
     return extractive_answer(question, chunks), "extractive"

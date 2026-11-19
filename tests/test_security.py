@@ -75,3 +75,54 @@ def test_api():
     r = client.post("/ask", json={"question": "Сколько стоит перевод в другой банк?"}, headers={"X-User": "guest"})
     assert r.status_code == 200 and "DOC-001" in r.json()["sources"]
     assert client.post("/ask", json={"question": "тест"}, headers={"X-User": "hacker"}).status_code == 401
+
+
+# --- Достоверность ответов ---
+
+from securerag.faithfulness import check_answer, normalize
+from securerag.llm import is_no_answer
+
+CTX = "Срок ответа на письменное обращение составляет не более 3 рабочих дней. Обслуживание по тарифу «Бизнес» 1 900 рублей."
+
+
+def test_faithful_answer_passes():
+    chk = check_answer("Срок ответа на письменное обращение составляет не более 3 рабочих дней [DOC-002].",
+                       CTX, {"DOC-002"}, ["3 рабочих дн"])
+    assert chk.claims_supported == chk.claims_total == 1
+    assert chk.unsupported_numbers == [] and chk.citations_ok and chk.missing_facts == []
+
+
+def test_hallucinations_are_caught():
+    chk = check_answer("Срок ответа составляет 5 рабочих дней [DOC-002]. "
+                       "Клиенту выплачивается компенсация за задержку ответа [DOC-004].",
+                       CTX, {"DOC-002"}, ["3 рабочих дн"])
+    assert "5" in chk.unsupported_numbers           # выдуманное число
+    assert chk.unsupported_claims                   # утверждение без опоры на контекст
+    assert not chk.citations_ok                     # ссылка на невыданный документ
+    assert chk.missing_facts == ["3 рабочих дн"]    # эталонный факт потерян
+
+
+def test_repeated_question_is_not_a_claim():
+    # Найдено при прогоне с qwen2.5:3b: модель повторила вопрос в начале ответа
+    chk = check_answer("На какой срок можно открыть вклад Надёжный?\nСрок вклада от 3 до 24 месяцев [DOC-005].",
+                       "Срок вклада от 3 до 24 месяцев.", {"DOC-005"})
+    assert chk.claims_total == chk.claims_supported == 1
+
+
+def test_number_normalization():
+    assert normalize("1900 рублей") == normalize("1 900 рублей")
+    assert normalize("1.5 процента") == normalize("1,5 процента")
+
+
+def test_refusal_detection():
+    assert is_no_answer("В доступных вам документах ответа нет.")
+    assert is_no_answer("«В предоставленных документах нет информации о тарифе Премиум.»")
+    assert not is_no_answer("Срок ответа составляет 3 рабочих дня [DOC-002].")
+
+
+def test_answer_quality_extractive(rag):
+    q = run(rag)["answer_quality"]
+    assert q["grounded_claims"].split("/")[0] == q["grounded_claims"].split("/")[1]
+    assert q["answers_with_supported_numbers"] == "9/9"
+    assert q["answers_with_valid_citations"] == "9/9"
+    assert q["expected_facts_found"] == "10/10"
