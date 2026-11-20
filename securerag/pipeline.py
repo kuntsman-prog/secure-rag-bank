@@ -41,10 +41,20 @@ class Answer:
 
 class SecureRAG:
     def __init__(self, docs_dir: Path | None = None, users_file: Path | None = None,
-                 log_file: Path | None = None, backend: str = "extractive"):
+                 log_file: Path | None = None, backend: str = "extractive",
+                 retrieval: str = "bm25", embedder: str = "ollama"):
         self.users = load_users(users_file or ROOT / "config" / "users.yaml")
         chunks, self.quarantined = load_chunks(docs_dir or ROOT / "data" / "docs")
         self.index = SecureIndex(chunks)
+        # Гибридный поиск: BM25 + векторы в Qdrant, оба с фильтром доступа до ранжирования
+        self.vector = None
+        self.retrieval = "bm25"
+        if retrieval == "hybrid":
+            from .vector import VectorIndex, make_embedder
+            self.vector = VectorIndex(chunks, make_embedder(embedder))
+            self.retrieval = f"hybrid:{self.vector.embedder.name}"
+        elif retrieval != "bm25":
+            raise ValueError(f"Неизвестный режим поиска: {retrieval}")
         self.log_file = log_file or ROOT / "logs" / "audit.jsonl"
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.backend = backend
@@ -66,6 +76,7 @@ class SecureRAG:
             "user": user.name,
             "role": user.role,
             "channel": channel,
+            "retrieval": self.retrieval,
             "question_masked": masked_q,
             "question_sha256": hashlib.sha256(question.encode()).hexdigest()[:16],
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -78,7 +89,7 @@ class SecureRAG:
         if not guard.allowed:
             return Answer("blocked_input", BLOCKED_INPUT, reasons=guard.reasons)
 
-        hits = self.index.search(user, question)
+        hits = self._retrieve(user, question)
         if not hits:
             return Answer("no_context", NO_ANSWER)
 
@@ -96,6 +107,14 @@ class SecureRAG:
         text, pii = mask_pii(text)
         reasons = [f"pii_masked:{k}" for k in pii]
         return Answer("answered", text, sources=sources, reasons=reasons, backend=backend, context=context)
+
+    def _retrieve(self, user: User, question: str, k: int = 3) -> list:
+        bm25 = self.index.search(user, question, k=10)
+        if self.vector is None:
+            return bm25[:k]
+        from .vector import rrf
+        dense = self.vector.search(user, question, k=10)
+        return rrf([[c for c, _ in bm25], [c for c, _ in dense]])[:k]
 
     def readable_documents(self, user_name: str) -> list[dict]:
         """Документы, доступные пользователю: только идентификатор и название, без содержимого."""

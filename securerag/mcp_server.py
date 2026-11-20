@@ -36,7 +36,11 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotent
 
 def build_server(user: str, rag: SecureRAG | None = None, rate_limit: int = RATE_LIMIT) -> MCPServer:
     """Создаёт MCP-сервер, привязанный к одному пользователю."""
-    rag = rag or SecureRAG(backend=os.environ.get("SECURERAG_BACKEND", "extractive"))
+    rag = rag or SecureRAG(
+        backend=os.environ.get("SECURERAG_BACKEND", "extractive"),
+        retrieval=os.environ.get("SECURERAG_RETRIEVAL", "bm25"),
+        embedder=os.environ.get("SECURERAG_EMBEDDER", "ollama"),
+    )
     rag.user(user)  # неизвестный пользователь: ошибка при запуске, а не при вызове
     calls: deque = deque()
 

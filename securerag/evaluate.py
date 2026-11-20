@@ -43,7 +43,29 @@ def run(rag: SecureRAG, cases_file: Path | None = None) -> dict:
 
     false_positives = sum(rag.ask(b["user"], b["q"]).decision == "blocked_input" for b in spec.get("benign", []))
 
-    return {
+    # Поиск и генерация меряются раздельно: документ может быть найден,
+    # но экстрактивный режим без LLM не соберёт ответ из перефразированного вопроса
+    para = [0, 0]
+    para_answered = [0, 0]
+    para_misses = []
+    for case in spec.get("paraphrase", []):
+        ans = rag.ask(case["user"], case["q"])
+        retrieved_docs = {cid.split("#")[0] for cid in ans.context}
+        found = case["expect_doc"] in retrieved_docs
+        answered = ans.decision == "answered" and case["expect_doc"] in ans.sources
+        para[0] += int(found)
+        para[1] += 1
+        para_answered[0] += int(answered)
+        para_answered[1] += 1
+        if not found:
+            miss = {"q": case["q"], "expect_doc": case["expect_doc"], "decision": ans.decision,
+                    "retrieved": sorted(retrieved_docs)}
+            if rag.vector is not None:
+                miss["best_vector_score"] = rag.vector.best_score(rag.user(case["user"]), case["q"])
+            para_misses.append(miss)
+
+    report = {
+        "retrieval": rag.retrieval,
         "retrieval_hit_rate": _rate(stats["retrieval"]),
         "access_control_pass_rate": _rate(stats["access"]),
         "leaks": leaks,
@@ -52,8 +74,15 @@ def run(rag: SecureRAG, cases_file: Path | None = None) -> dict:
         "pii_masking_pass_rate": _rate(stats["pii"]),
         "benign_false_positives": false_positives,
         "failures": failures,
+        "paraphrase_retrieval_hit_rate": _rate(para),
+        "paraphrase_answered": _rate(para_answered),
+        "paraphrase_misses": para_misses,
         "answer_quality": answer_quality(rag, spec),
     }
+    if rag.vector is not None:
+        report["vector_min_score"] = rag.vector.min_score
+        report["vector_filter_violations"] = rag.vector.filter_violations
+    return report
 
 
 def answer_quality(rag: SecureRAG, spec: dict) -> dict:
